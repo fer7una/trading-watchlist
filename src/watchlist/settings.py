@@ -34,6 +34,7 @@ class RuntimeSettings:
 
     # FMP
     fmp_api_key: str
+    float_allow_stale_days: int
 
     # RVOL
     rvol_anchor_ny: str  # HH:MM
@@ -80,6 +81,7 @@ def load_settings(project_root: str | None = None) -> RuntimeSettings:
         ib_client_id=int(os.getenv("IB_CLIENT_ID", "7")),
         ib_timeout_s=float(os.getenv("IB_TIMEOUT_S", "10")),
         fmp_api_key=fmp_key,
+        float_allow_stale_days=int(os.getenv("FLOAT_ALLOW_STALE_DAYS", "14")),
         rvol_anchor_ny=os.getenv("RVOL_ANCHOR_NY", "04:00"),
         rvol_lookback_days=int(os.getenv("RVOL_LOOKBACK_DAYS", "20")),
         use_rth=os.getenv("USE_RTH", "0") == "1",

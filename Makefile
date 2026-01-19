@@ -12,7 +12,7 @@ install-dev:
 	@source .venv/bin/activate && pip install -e .[dev]
 
 run:
-	@source .venv/bin/activate && watchlist-build
+	@source .venv/bin/activate && PYTHONPATH=src python -m watchlist.cli
 
 fmt:
 	@source .venv/bin/activate && black src tests

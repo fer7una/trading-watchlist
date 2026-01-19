@@ -86,7 +86,7 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
     provider = FmpFloatProvider(settings.fmp_api_key)
     missing = [m.symbol for _, m in prelim if m.symbol not in float_map]
     if missing:
-        fetched = provider.prefetch(conn, missing, asof_date_ny, allow_stale_days=14)
+        fetched = provider.prefetch(conn, missing, asof_date_ny, allow_stale_days=settings.float_allow_stale_days)
         float_map.update(fetched)
 
     # apply float filter

@@ -86,7 +86,13 @@ class FmpFloatProvider:
         if row:
             return int(row[0])
 
-        # 2) stale cache
+        # 2) fetch
+        result = self._fetch(symbol, max_retries=max_retries, min_delay_s=min_delay_s, backoff_base_s=backoff_base_s)
+        if result is not None:
+            db.upsert_float(conn, symbol, asof_date_ny, result.float_shares, result.source)
+            return result.float_shares
+
+        # 3) stale cache (fallback when fetch fails)
         if allow_stale_days > 0:
             min_date = (datetime.fromisoformat(asof_date_ny).date() - timedelta(days=allow_stale_days)).isoformat()
             cur = conn.execute(
@@ -103,13 +109,7 @@ class FmpFloatProvider:
             if row:
                 return int(row[0])
 
-        # 3) fetch
-        result = self._fetch(symbol, max_retries=max_retries, min_delay_s=min_delay_s, backoff_base_s=backoff_base_s)
-        if result is None:
-            return None
-
-        db.upsert_float(conn, symbol, asof_date_ny, result.float_shares, result.source)
-        return result.float_shares
+        return None
 
     def _fetch(
         self,

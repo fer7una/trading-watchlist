@@ -1,4 +1,4 @@
-# ross-watchlist-diy
+# trading-watchlist
 
 Generador DIY de watchlist estilo Ross (momentum / low float) usando:
 
@@ -23,7 +23,7 @@ Esto está pensado para correr **cada mañana** desde **WSL** y dejarte:
 ## Setup rápido (WSL)
 
 ```bash
-cd ross-watchlist-diy
+cd trading-watchlist
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip

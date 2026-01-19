@@ -20,8 +20,8 @@ sudo apt install -y python3 python3-venv python3-pip git make sqlite3
 ## 3) Clonar repo y venv
 
 ```bash
-git clone <TU_REPO> ross-watchlist-diy
-cd ross-watchlist-diy
+git clone <TU_REPO> trading-watchlist
+cd trading-watchlist
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -68,7 +68,7 @@ systemctl --user list-timers | grep watchlist
 Crea una tarea diaria que ejecute:
 
 ```powershell
-wsl -d Ubuntu -- bash -lc "cd ~/ross-watchlist-diy && source .venv/bin/activate && make run"
+wsl -d Ubuntu -- bash -lc "cd ~/trading-watchlist && source .venv/bin/activate && make run"
 ```
 
 Si quieres logs: redirige a `logs/watchlist.log`.

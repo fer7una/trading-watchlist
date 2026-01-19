@@ -3,5 +3,5 @@ Description=Ross DIY Watchlist Builder
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/ross-watchlist-diy
+WorkingDirectory=%h/trading-watchlist
 ExecStart=/bin/bash -lc 'source .venv/bin/activate && make run'

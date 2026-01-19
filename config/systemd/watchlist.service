@@ -1,0 +1,7 @@
+[Unit]
+Description=Ross DIY Watchlist Builder
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/ross-watchlist-diy
+ExecStart=/bin/bash -lc 'source .venv/bin/activate && make run'

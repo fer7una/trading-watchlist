@@ -1,0 +1,14 @@
+services:
+  watchlist:
+    build: .
+    env_file:
+      - .env
+    environment:
+      # If IB Gateway/TWS is on Windows, container can usually reach it here:
+      IB_HOST: ${IB_HOST:-host.docker.internal}
+    volumes:
+      - ./data:/app/data
+      - ./out:/app/out
+      - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

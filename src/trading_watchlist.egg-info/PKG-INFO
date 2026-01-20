@@ -5,6 +5,8 @@ Requires-Python: >=3.11
 Requires-Dist: ib_insync==0.9.86
 Requires-Dist: requests==2.32.3
 Requires-Dist: python-dotenv==1.0.1
+Requires-Dist: pandas==2.2.2
+Requires-Dist: pandas_market_calendars==4.4.0
 Provides-Extra: dev
 Requires-Dist: ruff; extra == "dev"
 Requires-Dist: black; extra == "dev"

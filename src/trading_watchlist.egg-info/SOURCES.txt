@@ -12,7 +12,11 @@ src/watchlist/cli.py
 src/watchlist/db.py
 src/watchlist/float_provider.py
 src/watchlist/ibkr.py
+src/watchlist/market_phase.py
 src/watchlist/output.py
+src/watchlist/profiles.py
 src/watchlist/rvol.py
 src/watchlist/scoring.py
 src/watchlist/settings.py
+tests/test_fallback.py
+tests/test_market_phase.py

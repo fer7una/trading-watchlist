@@ -43,6 +43,8 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         volume_min=settings.filters.volume_min,
         max_rows=settings.filters.max_candidates,
     )
+    scan_candidates_count = len(scan)
+    invalid_last_count = 0
 
     # cache symbols metadata
     for c in scan:
@@ -52,7 +54,8 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
     prelim: List[Tuple[ibkr.IbContractInfo, Metrics]] = []
     for c in scan:
         last, prev_close, vol_today, bid, ask = ibkr.snapshot_metrics(ib, c.symbol)
-        if last is None:
+        if last is None or last <= 0:
+            invalid_last_count += 1
             continue
         if not (settings.filters.price_min <= last <= settings.filters.price_max):
             continue
@@ -171,6 +174,13 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         "run_id": str(uuid.uuid4()),
         "generated_utc": _iso(now_utc),
         "generated_ny": _iso(now_ny),
+        "scan": {
+            "candidates": scan_candidates_count,
+            "prelim": len(prelim),
+            "filtered": len(filtered),
+            "final": len(final),
+            "invalid_last": invalid_last_count,
+        },
         "filters": asdict(settings.filters),
         "rvol": {
             "anchor_time_ny": settings.rvol_anchor_ny,

@@ -69,7 +69,7 @@ def load_settings(project_root: str | None = None) -> RuntimeSettings:
         rvol_min=float(os.getenv("RVOL_MIN", "3")),
         float_max=int(os.getenv("FLOAT_MAX", "10000000")),
         spread_max=float(os.getenv("SPREAD_MAX", "0.15")),
-        max_candidates=int(os.getenv("MAX_CANDIDATES", "60")),
+        max_candidates=int(os.getenv("MAX_CANDIDATES", "50")),
         max_rvol_symbols=int(os.getenv("MAX_RVOL_SYMBOLS", "30")),
     )
 

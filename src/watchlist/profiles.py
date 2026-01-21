@@ -18,6 +18,8 @@ _PROFILE_FIELDS = (
     "RVOL_MIN",
     "RVOL_ANCHOR_NY",
     "USE_RTH",
+    "SPREAD_PCT_MAX",
+    "SPREAD_ABS_MAX",
     "SPREAD_MAX",
     "MAX_CANDIDATES",
     "MAX_RVOL_SYMBOLS",
@@ -54,7 +56,27 @@ def load_profile(
         v = env.get(_env_key(prefix, name))
         return v if v not in (None, "") else default
 
+    def _get_optional(name: str) -> str | None:
+        v = env.get(_env_key(prefix, name))
+        return v if v not in (None, "") else None
+
     base_filters = base_settings.filters
+    spread_pct_raw = _get_optional("SPREAD_PCT_MAX")
+    spread_abs_raw = _get_optional("SPREAD_ABS_MAX")
+    legacy_spread_raw = _get_optional("SPREAD_MAX")
+    spread_pct_max = None
+    used_legacy_spread = False
+    if spread_pct_raw is not None:
+        spread_pct_max = float(spread_pct_raw)
+    elif legacy_spread_raw is not None:
+        spread_pct_max = float(legacy_spread_raw)
+        used_legacy_spread = True
+    else:
+        spread_pct_max = base_filters.spread_pct_max
+    spread_abs_max = float(spread_abs_raw) if spread_abs_raw is not None else base_filters.spread_abs_max
+    if used_legacy_spread and base_settings.debug:
+        print(f"DEBUG: {_env_key(prefix, 'SPREAD_MAX')} is deprecated; treating as SPREAD_PCT_MAX.")
+
     filters = Filters(
         price_min=float(_get_value("PRICE_MIN", str(base_filters.price_min))),
         price_max=float(_get_value("PRICE_MAX", str(base_filters.price_max))),
@@ -62,7 +84,8 @@ def load_profile(
         volume_min=int(_get_value("VOLUME_MIN", str(base_filters.volume_min))),
         rvol_min=float(_get_value("RVOL_MIN", str(base_filters.rvol_min))),
         float_max=int(_get_value("FLOAT_MAX", str(base_filters.float_max))),
-        spread_max=float(_get_value("SPREAD_MAX", str(base_filters.spread_max))),
+        spread_abs_max=spread_abs_max,
+        spread_pct_max=spread_pct_max,
         max_candidates=int(_get_value("MAX_CANDIDATES", str(base_filters.max_candidates))),
         max_rvol_symbols=int(_get_value("MAX_RVOL_SYMBOLS", str(base_filters.max_rvol_symbols))),
     )
@@ -75,12 +98,19 @@ def load_profile(
         rvol_anchor_ny=rvol_anchor_ny,
         use_rth=use_rth,
         filters=filters,
+        profile_used=prefix.upper(),
     )
 
 
 def resolve_effective_profile(profile_mode: str | None, now_utc: datetime) -> tuple[str, RuntimeSettings]:
     base_settings = load_settings()
     env = os.environ
+    open_raw = env.get("OPEN", "").strip()
+    if open_raw in ("0", "1"):
+        prefix = "OPEN" if open_raw == "1" else "PRE"
+        settings = load_profile(prefix, env=env, base_settings=base_settings)
+        return prefix, settings
+
     mode = (profile_mode or env.get("PROFILE", "auto")).strip().lower()
     phase = get_market_phase(now_utc)
     force_profile = env.get("FORCE_PROFILE", "0") == "1"

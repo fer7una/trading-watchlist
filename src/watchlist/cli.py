@@ -12,6 +12,9 @@ from .market_phase import MarketPhase, get_market_phase, get_schedule_for_date
 from .output import tv_symbol, write_json, write_tradingview_txt
 from .profiles import resolve_effective_profile
 
+from dotenv import load_dotenv
+load_dotenv()
+
 NY = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 
@@ -186,7 +189,8 @@ def _build_fallback_payload(
         "fallback_used": True,
         "fallback_reason": reason,
         "profile_used": profile_used,
-        "phase": phase.value,
+        "phase": profile_used,
+        "market_phase": phase.value,
         "schedule_times_ny": schedule_times_ny,
         "symbols": symbols,
         "tradingview": tradingview,
@@ -318,7 +322,8 @@ def main() -> int:
 
     payload = build_watchlist(settings)
     payload["profile_used"] = profile_used
-    payload["phase"] = phase.value
+    payload["phase"] = profile_used
+    payload["market_phase"] = phase.value
     payload["schedule_times_ny"] = schedule_times_ny
 
     scan_meta = payload.get("scan", {})

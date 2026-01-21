@@ -1,24 +1,20 @@
 from __future__ import annotations
 
+import math
 import os
 import uuid
 from dataclasses import asdict
-from datetime import datetime, timedelta, time
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
-from . import db, ibkr, rvol, output
+from . import db, ibkr, rvol, output, news, sanity
 from .float_provider import FmpFloatProvider
 from .scoring import Metrics, grade_and_score
 from .settings import RuntimeSettings
 
 NY = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
-
-
-def _parse_time_hhmm(v: str) -> time:
-    hh, mm = v.split(":")
-    return time(int(hh), int(mm))
 
 
 def _iso(dt: datetime) -> str:
@@ -29,12 +25,10 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
     now_ny = datetime.now(tz=NY)
     now_utc = datetime.now(tz=UTC)
     asof_date_ny = now_ny.date().isoformat()
-    anchor = _parse_time_hhmm(settings.rvol_anchor_ny)
-
     conn = db.connect(settings.db_path)
     db.init_schema(conn, schema_file=os.path.join("config", "schema.sql"))
 
-    ib = ibkr.connect(settings.ib_host, settings.ib_port, settings.ib_client_id, settings.ib_timeout_s)
+    ib = ibkr.connect(settings.ib_host, settings.ib_port, settings.ib_client_id, settings.ib_timeout_s, settings.ib_market_data_type)
 
     scan = ibkr.scan_top_perc_gainers(
         ib,
@@ -44,6 +38,10 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         max_rows=settings.filters.max_candidates,
     )
     scan_candidates_count = len(scan)
+    if settings.debug:
+        print(f"scan candidates: {scan_candidates_count}")
+        if scan_candidates_count == 0:
+            print("scan candidates is 0; scanner tried fallback codes, check IBKR errors/entitlements")
     invalid_last_count = 0
 
     # cache symbols metadata
@@ -71,6 +69,9 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         spread = None
         if bid is not None and ask is not None and bid > 0 and ask > 0:
             spread = ask - bid
+        spread_pct = None
+        if spread is not None and last is not None and last > 0:
+            spread_pct = spread / last
 
         m = Metrics(
             symbol=c.symbol,
@@ -81,8 +82,11 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
             bid=bid,
             ask=ask,
             spread=float(spread) if spread is not None else None,
+            spread_pct=float(spread_pct) if spread_pct is not None else None,
         )
         prelim.append((c, m))
+    if settings.debug:
+        print(f"prelim after snapshot+basic filters: {len(prelim)}")
 
     # float (DB cache + FMP for missing)
     float_map = db.load_float_snapshots(conn, asof_date_ny)
@@ -100,6 +104,8 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         if fs is not None and fs > settings.filters.float_max:
             continue
         filtered.append((c, m))
+    if settings.debug:
+        print(f"after float filter: {len(filtered)}")
 
     # RVOL: compute for top N by change_pct to avoid pacing
     filtered.sort(key=lambda t: (t[1].change_pct or 0.0), reverse=True)
@@ -109,17 +115,35 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
     since_utc = (now_ny - timedelta(days=duration_days)).astimezone(UTC)
     since_iso = _iso(since_utc)
 
-    for c, m in top_for_rvol:
+    for idx, (c, m) in enumerate(top_for_rvol):
+        if settings.debug:
+            print(f"RVOL {idx + 1}/{len(top_for_rvol)} {m.symbol} ...")
         # try cached bars
         cached = db.load_minute_volumes_since(conn, m.symbol, since_iso)
         bars: List[Tuple[datetime, int]] = []
         if cached:
             for ts_iso, vol in cached:
-                bars.append((datetime.fromisoformat(ts_iso), int(vol)))
+                dt = datetime.fromisoformat(ts_iso)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                bars.append((dt, int(vol)))
 
         # if not enough cache, fetch from IBKR
         if len(bars) < 500:
-            hist = ibkr.historical_bars_1m(ib, m.symbol, duration_days=duration_days, use_rth=settings.use_rth)
+            try:
+                hist = ibkr.historical_bars_intraday(
+                    ib,
+                    m.symbol,
+                    duration_days=duration_days,
+                    use_rth=settings.use_rth,
+                    bar_size=settings.rvol_bar_size,
+                )
+            except TimeoutError:
+                if settings.debug:
+                    print(f"RVOL timeout {m.symbol}")
+                ib.sleep(settings.rvol_throttle_s)
+                continue
+            ib.sleep(settings.rvol_throttle_s)
             if hist:
                 rows = []
                 for b in hist:
@@ -129,24 +153,159 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
                     ts_utc = dt.astimezone(UTC).replace(microsecond=0).isoformat()
                     rows.append((ts_utc, float(b.open), float(b.high), float(b.low), float(b.close), int(b.volume or 0)))
                 db.cache_minute_bars(conn, m.symbol, rows)
-                bars = [(datetime.fromisoformat(ts), int(v)) for ts, v in db.load_minute_volumes_since(conn, m.symbol, since_iso)]
+                bars = []
+                for ts, v in db.load_minute_volumes_since(conn, m.symbol, since_iso):
+                    dt = datetime.fromisoformat(ts)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=UTC)
+                    bars.append((dt, int(v)))
 
-        m.rvol = rvol.compute_rvol_time_of_day(
+        rvol_result = rvol.compute_rvol_from_bars_details(
             bars,
-            anchor_ny=anchor,
+            anchor_time_ny=settings.rvol_anchor_ny,
             lookback_days=settings.rvol_lookback_days,
+            use_rth=settings.use_rth,
             now_ny=now_ny,
+            bar_size=settings.rvol_bar_size,
+            method=settings.rvol_method,
+            trim_pct=settings.rvol_trim_pct,
+            min_days_valid=settings.min_rvol_days_valid,
+            baseline_floor_vol=settings.rvol_baseline_floor_vol,
+            cap=settings.rvol_cap,
         )
+        if rvol_result:
+            m.rvol = rvol_result.rvol
+            m.rvol_raw = rvol_result.rvol_raw
+            m.rvol_days_valid = rvol_result.days_valid
+            m.rvol_cap_applied = rvol_result.cap_applied
+            cap_for_score = settings.rvol_cap if settings.rvol_cap and settings.rvol_cap > 1 else 200.0
+            m.rvol_score = min(1.0, math.log10(max(m.rvol_raw, 1.0)) / math.log10(cap_for_score))
+        else:
+            m.rvol = None
+            m.rvol_raw = None
+            m.rvol_days_valid = None
+            m.rvol_cap_applied = None
+            m.rvol_score = None
+
+        if settings.debug:
+            if rvol_result:
+                print(
+                    "RVOL detail {sym}: todayVol={today} baseline(min/med/max)={minv}/{medv}/{maxv} "
+                    "baseline={base:.0f} days={days} method={method} raw={raw:.2f} rvol={rvol:.2f} cap={cap}"
+                    .format(
+                        sym=m.symbol,
+                        today=rvol_result.today_volume,
+                        minv=int(rvol_result.baseline_min),
+                        medv=int(rvol_result.baseline_median),
+                        maxv=int(rvol_result.baseline_max),
+                        base=rvol_result.baseline,
+                        days=rvol_result.days_valid,
+                        method=rvol_result.method,
+                        raw=rvol_result.rvol_raw,
+                        rvol=rvol_result.rvol,
+                        cap="yes" if rvol_result.cap_applied else "no",
+                    )
+                )
+            else:
+                print(f"RVOL detail {m.symbol}: insufficient data or baseline below floor")
 
     # final filters + grading
-    final: List[dict] = []
+    candidates: List[Tuple[ibkr.IbContractInfo, Metrics]] = []
     for c, m in filtered:
-        if m.rvol is not None and m.rvol < settings.filters.rvol_min:
+        if m.rvol is None or m.rvol < settings.filters.rvol_min:
             continue
-        if m.spread is not None and m.spread > (settings.filters.spread_max * 2.0):
-            continue
+        if settings.filters.spread_abs_max > 0:
+            if m.spread is None or m.spread > settings.filters.spread_abs_max:
+                continue
+        if settings.filters.spread_pct_max > 0:
+            if m.spread_pct is None or m.spread_pct > settings.filters.spread_pct_max:
+                continue
+        candidates.append((c, m))
 
-        grade, score = grade_and_score(m, float_max=settings.filters.float_max, spread_max=settings.filters.spread_max)
+    news_map: Dict[str, dict] = {}
+    news_disabled_reason = None
+    provider_name = (settings.news_provider or "fmp").strip().lower()
+    if provider_name not in ("fmp", "none"):
+        if settings.debug:
+            print(f"WARN: NEWS_PROVIDER={provider_name!r} unsupported; disabling news.")
+        provider_name = "none"
+
+    news_enabled = provider_name == "fmp" and settings.news_lookback_hours > 0
+    if provider_name == "none":
+        news_enabled = False
+        news_disabled_reason = "disabled"
+        news_map = news.fetch_news([m.symbol for _, m in candidates], settings.news_lookback_hours, provider="none")
+    elif settings.news_lookback_hours <= 0:
+        news_enabled = False
+        news_disabled_reason = "lookback_disabled"
+    elif candidates:
+        news_symbols = sorted(candidates, key=lambda t: (t[1].change_pct or 0.0), reverse=True)
+        if settings.news_debug_top_n > 0:
+            news_symbols = news_symbols[: settings.news_debug_top_n]
+        fetch_list = [m.symbol for _, m in news_symbols]
+        try:
+            news_map = news.fetch_news(fetch_list, settings.news_lookback_hours, provider=provider_name, api_key=settings.fmp_api_key)
+            news_enabled = True
+        except news.NewsProviderRestricted:
+            news_disabled_reason = "fmp_plan_restricted"
+            news_enabled = False
+            news_map = {m.symbol: news.restricted_result(provider="fmp") for _, m in candidates}
+            if settings.debug:
+                print("NEWS disabled: FMP endpoint restricted (402). Upgrade plan or switch provider.")
+
+        if settings.debug and news_enabled and settings.news_debug_top_n > 0:
+            for _, m in news_symbols:
+                info = news_map.get(m.symbol, {})
+                status = info.get("status")
+                total_news = info.get("totalNews")
+                recent_news = info.get("recentNews")
+                first_date = info.get("publishedAt")
+                first_headline = info.get("headline")
+                print(
+                    f"NEWS {m.symbol} status={status} total={total_news} recent={recent_news} "
+                    f"first={first_date} headline={first_headline}"
+                )
+
+    final: List[dict] = []
+    for c, m in candidates:
+        news_info = news_map.get(m.symbol) or {}
+        headline = news_info.get("headline")
+        summary = news_info.get("summary")
+        catalyst_text = summary or headline
+        has_catalyst_val = news_info.get("hasCatalyst")
+        catalyst_error = news_info.get("error")
+        m.has_catalyst = bool(has_catalyst_val)
+
+        flags = sanity.run_sanity_checks(
+            m.last,
+            m.prev_close,
+            m.change_pct,
+            m.spread,
+            m.spread_pct,
+            m.volume_today,
+            prevclose_min=settings.sanity_prevclose_min,
+            change_pct_max=settings.sanity_change_pct_max,
+            spread_pct_max=settings.spread_pct_max,
+            min_vol_for_high_change=settings.min_vol_for_high_change,
+        )
+        m.suspect_corporate_action = bool(flags.get("suspectCorporateAction"))
+        m.suspect_data = bool(flags.get("suspectData"))
+
+        if has_catalyst_val is True and not catalyst_text:
+            catalyst_text = "news"
+        if catalyst_error in ("restricted_endpoint_402", "disabled"):
+            catalyst_text = "unavailable"
+        elif has_catalyst_val is None:
+            catalyst_text = "unknown"
+        elif not has_catalyst_val and m.suspect_corporate_action and not catalyst_text:
+            catalyst_text = "corporate_action_suspect"
+
+        grade, score = grade_and_score(
+            m,
+            float_max=settings.filters.float_max,
+            spread_abs_max=settings.filters.spread_abs_max,
+            spread_pct_max=settings.filters.spread_pct_max,
+        )
         tv = output.tv_symbol(m.symbol, c.primary_exchange)
 
         final.append({
@@ -160,8 +319,24 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
             "bid": m.bid,
             "ask": m.ask,
             "spread": m.spread,
+            "spreadPct": m.spread_pct,
             "floatShares": m.float_shares,
             "rvol": m.rvol,
+            "rvolRaw": m.rvol_raw,
+            "rvolScore": m.rvol_score,
+            "rvolDaysValid": m.rvol_days_valid,
+            "capApplied": m.rvol_cap_applied,
+            "hasCatalyst": has_catalyst_val,
+            "catalyst": catalyst_text,
+            "catalystProvider": news_info.get("provider"),
+            "catalystHeadline": headline,
+            "catalystSummary": summary,
+            "catalystPublishedAt": news_info.get("publishedAt"),
+            "catalystSource": news_info.get("source"),
+            "catalystUrl": news_info.get("url"),
+            "catalystError": news_info.get("error"),
+            "suspectCorporateAction": m.suspect_corporate_action,
+            "suspectData": m.suspect_data,
             "grade": grade,
             "score": score,
         })
@@ -169,6 +344,13 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
     # order by grade then score desc
     order = {"A": 0, "B": 1, "C": 2, "D": 3}
     final.sort(key=lambda x: (order.get(x["grade"], 9), -float(x["score"])))
+    if settings.debug:
+        print(f"final after rvol/spread filters: {len(final)}")
+
+    filters_payload = asdict(settings.filters)
+    filters_payload["spread_max"] = filters_payload.get("spread_pct_max")
+    filters_payload["spreadAbsMax"] = filters_payload.get("spread_abs_max")
+    filters_payload["spreadPctMax"] = filters_payload.get("spread_pct_max")
 
     payload = {
         "run_id": str(uuid.uuid4()),
@@ -181,11 +363,23 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
             "final": len(final),
             "invalid_last": invalid_last_count,
         },
-        "filters": asdict(settings.filters),
+        "filters": filters_payload,
         "rvol": {
             "anchor_time_ny": settings.rvol_anchor_ny,
             "lookback_days": settings.rvol_lookback_days,
             "use_rth": settings.use_rth,
+            "bar_size": settings.rvol_bar_size,
+            "method": settings.rvol_method,
+            "trim_pct": settings.rvol_trim_pct,
+            "min_days_valid": settings.min_rvol_days_valid,
+            "baseline_floor_vol": settings.rvol_baseline_floor_vol,
+            "cap": settings.rvol_cap,
+        },
+        "news": {
+            "lookback_hours": settings.news_lookback_hours,
+            "provider": provider_name,
+            "enabled": news_enabled,
+            "reason_if_disabled": news_disabled_reason,
         },
         "symbols": final,
         "tradingview": {

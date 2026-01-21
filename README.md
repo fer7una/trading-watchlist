@@ -39,6 +39,12 @@ Ejecuta:
 make run
 ```
 
+Para depurar contadores por etapa:
+
+```bash
+DEBUG=1 make run
+```
+
 Salida:
 
 - `out/watchlist.json`
@@ -62,8 +68,10 @@ Manual:
 Variables por perfil (todas opcionales, con fallback a las actuales):
 
 `*_PRICE_MIN`, `*_PRICE_MAX`, `*_FLOAT_MAX`, `*_CHANGE_MIN_PCT`, `*_VOLUME_MIN`,
-`*_RVOL_MIN`, `*_RVOL_ANCHOR_NY`, `*_USE_RTH`, `*_SPREAD_MAX`,
+`*_RVOL_MIN`, `*_RVOL_ANCHOR_NY`, `*_USE_RTH`, `*_SPREAD_PCT_MAX`, `*_SPREAD_ABS_MAX`,
 `*_MAX_CANDIDATES`, `*_MAX_RVOL_SYMBOLS`
+
+`*_SPREAD_MAX` sigue soportado como alias legado de `*_SPREAD_PCT_MAX`.
 
 Ejemplo: `PRE_PRICE_MIN=2` o `OPEN_USE_RTH=1`.
 

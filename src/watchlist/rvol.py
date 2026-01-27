@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, time
+from datetime import date, datetime, timedelta, time
 from zoneinfo import ZoneInfo
 from typing import Dict, Iterable, List, Optional, Tuple
+
+import pandas_market_calendars as mcal
 
 NY = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 RTH_OPEN = time(9, 30)
 RTH_CLOSE = time(16, 0)
+PRE_OPEN = time(4, 0)
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,43 @@ class RvolResult:
     baseline_max: float
     today_volume: int
     method: str
+    cap_applied: bool
+
+
+@dataclass(frozen=True)
+class BaselineCurve:
+    symbol: str
+    session: str
+    bar_size: str
+    lookback_days: int
+    method: str
+    trim_pct: float
+    updated_at: datetime
+    baseline_cumvol: List[float]
+    history_days_used: int
+    notes: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DayVolumeSeries:
+    date: str
+    vol_1m: List[int]
+    cumvol_1m: List[int]
+    missing_bars: int
+
+
+@dataclass(frozen=True)
+class RvolTimeOfDayResult:
+    symbol: str
+    minute_index: Optional[int]
+    cumvol_today: Optional[int]
+    baseline_cumvol: Optional[float]
+    rvol_raw: Optional[float]
+    rvol: Optional[float]
+    history_days_used: int
+    baseline_low: bool
+    insufficient_history: bool
+    session_mismatch: bool
     cap_applied: bool
 
 
@@ -63,14 +103,39 @@ def minute_index(dt_ny: datetime, anchor: time) -> int:
     return int((dt_ny - anchor_dt).total_seconds() // 60)
 
 
-def compute_rvol_time_of_day(
+def _session_times(session: str) -> Tuple[time, time]:
+    session_clean = (session or "RTH").strip().upper()
+    if session_clean == "RTH+PRE":
+        return PRE_OPEN, RTH_CLOSE
+    return RTH_OPEN, RTH_CLOSE
+
+
+def _session_minutes(session: str) -> int:
+    start, end = _session_times(session)
+    return int((datetime.combine(date.today(), end) - datetime.combine(date.today(), start)).total_seconds() // 60)
+
+
+def session_bar_count(session: str, bar_size: str) -> int:
+    return max(1, int(_session_minutes(session) / _parse_bar_minutes(bar_size)))
+
+
+def minute_index_in_session(now_ny: datetime, session: str) -> Optional[int]:
+    start, end = _session_times(session)
+    t = now_ny.timetz().replace(tzinfo=None)
+    if t < start or t >= end:
+        return None
+    start_dt = datetime.combine(now_ny.date(), start)
+    return int((datetime.combine(now_ny.date(), t) - start_dt).total_seconds() // 60)
+
+
+def compute_rvol_time_of_day_legacy(
     bars_utc: List[Tuple[datetime, int]],
     *,
     anchor_ny: time,
     lookback_days: int,
     now_ny: datetime,
 ) -> Optional[float]:
-    """Compute time-of-day RVOL.
+    """Compute time-of-day RVOL (legacy).
 
     RVOL(t) = cumVol_today(t) / avg(cumVol_pastDays(t))
     where t is the minute index from anchor_ny.
@@ -119,14 +184,321 @@ def _parse_time_hhmm(value: str) -> time:
 
 
 def _parse_bar_minutes(bar_size: str) -> int:
-    parts = bar_size.strip().split()
-    if not parts:
+    import re
+
+    s = (bar_size or "").strip().lower()
+    if not s:
         return 1
-    try:
-        mins = int(parts[0])
-    except ValueError:
-        return 1
-    return max(1, mins)
+    parts = s.split()
+    if len(parts) >= 2:
+        try:
+            mins = int(parts[0])
+            return max(1, mins)
+        except ValueError:
+            return 1
+    m = re.match(r"^(\d+)", s)
+    if m:
+        try:
+            return max(1, int(m.group(1)))
+        except ValueError:
+            return 1
+    return 1
+
+
+def previous_trading_days(now_ny: datetime, lookback_days: int, calendar_name: str | None = None) -> List[date]:
+    cal = mcal.get_calendar(calendar_name or "NYSE")
+    start_date = now_ny.date() - timedelta(days=max(lookback_days * 3, 10))
+    schedule = cal.schedule(start_date=start_date, end_date=now_ny.date())
+    if schedule.empty:
+        return []
+    days = [d.date() for d in schedule.index]
+    days = [d for d in days if d < now_ny.date()]
+    return days[-lookback_days:]
+
+
+def get_intraday_1m_volume(
+    bars_utc: Iterable[Tuple[datetime, int]],
+    *,
+    date_ny: date,
+    session: str,
+    bar_size: str,
+) -> Optional[DayVolumeSeries]:
+    bar_minutes = _parse_bar_minutes(bar_size)
+    if bar_minutes <= 0:
+        return None
+    start, end = _session_times(session)
+    expected_bars = max(1, int(_session_minutes(session) / bar_minutes))
+    vols = [0 for _ in range(expected_bars)]
+    counts = [0 for _ in range(expected_bars)]
+    found_any = False
+
+    for ts_utc, vol in bars_utc:
+        ts_ny = ts_utc.astimezone(NY)
+        if ts_ny.date() != date_ny:
+            continue
+        t = ts_ny.timetz().replace(tzinfo=None)
+        if t < start or t >= end:
+            continue
+        found_any = True
+        mins_since = int((datetime.combine(date_ny, t) - datetime.combine(date_ny, start)).total_seconds() // 60)
+        idx = mins_since // bar_minutes
+        if 0 <= idx < expected_bars:
+            vols[idx] += int(vol or 0)
+            counts[idx] += 1
+
+    if not found_any:
+        return None
+
+    missing_bars = sum(1 for c in counts if c == 0)
+    cumvol: List[int] = []
+    running = 0
+    for v in vols:
+        running += int(v)
+        cumvol.append(running)
+
+    return DayVolumeSeries(
+        date=date_ny.isoformat(),
+        vol_1m=vols,
+        cumvol_1m=cumvol,
+        missing_bars=missing_bars,
+    )
+
+
+def build_baseline_curve_from_bars(
+    *,
+    symbol: str,
+    bars_utc: Iterable[Tuple[datetime, int]],
+    now_ny: datetime,
+    session: str,
+    bar_size: str,
+    lookback_days: int,
+    method: str,
+    trim_pct: float,
+    min_history_days: int,
+    min_baseline: int,
+    calendar_name: str | None = None,
+) -> BaselineCurve:
+    bars_list = list(bars_utc)
+    days = previous_trading_days(now_ny, lookback_days, calendar_name=calendar_name)
+    series_list: List[DayVolumeSeries] = []
+    missing_total = 0
+    for d in days:
+        series = get_intraday_1m_volume(bars_list, date_ny=d, session=session, bar_size=bar_size)
+        if series is None:
+            continue
+        series_list.append(series)
+        missing_total += series.missing_bars
+
+    history_days_used = len(series_list)
+    expected_bars = max(1, int(_session_minutes(session) / _parse_bar_minutes(bar_size)))
+    baseline_cumvol: List[float] = []
+    notes_parts: List[str] = []
+
+    for t in range(expected_bars):
+        samples = [float(s.cumvol_1m[t]) for s in series_list if t < len(s.cumvol_1m)]
+        base = select_method(method, samples, trim_pct) or 0.0
+        if base < float(min_baseline):
+            base = float(min_baseline)
+        baseline_cumvol.append(float(base))
+
+    if history_days_used < max(1, min_history_days):
+        notes_parts.append("insufficient_history")
+    if missing_total > 0:
+        notes_parts.append(f"missing_bars={missing_total}")
+    if history_days_used == 0:
+        notes_parts.append("no_history")
+
+    return BaselineCurve(
+        symbol=symbol,
+        session=(session or "RTH").strip().upper(),
+        bar_size=bar_size,
+        lookback_days=lookback_days,
+        method=(method or "median").strip().lower(),
+        trim_pct=float(trim_pct),
+        updated_at=datetime.now(tz=UTC),
+        baseline_cumvol=baseline_cumvol,
+        history_days_used=history_days_used,
+        notes=";".join(notes_parts) if notes_parts else None,
+    )
+
+
+def compute_rvol_time_of_day(
+    *,
+    symbol: str,
+    bars_utc: Iterable[Tuple[datetime, int]],
+    baseline_curve: Optional[BaselineCurve],
+    now_ny: datetime,
+    session: str,
+    bar_size: str,
+    min_history_days: int,
+    min_baseline: int,
+    cap: Optional[float] = None,
+) -> RvolTimeOfDayResult:
+    bars_list = list(bars_utc)
+    minute_idx = minute_index_in_session(now_ny, session)
+    if minute_idx is None:
+        return RvolTimeOfDayResult(
+            symbol=symbol,
+            minute_index=None,
+            cumvol_today=None,
+            baseline_cumvol=None,
+            rvol_raw=None,
+            rvol=None,
+            history_days_used=baseline_curve.history_days_used if baseline_curve else 0,
+            baseline_low=False,
+            insufficient_history=True if baseline_curve is None else baseline_curve.history_days_used < min_history_days,
+            session_mismatch=True,
+            cap_applied=False,
+        )
+
+    today_series = get_intraday_1m_volume(
+        bars_list,
+        date_ny=now_ny.date(),
+        session=session,
+        bar_size=bar_size,
+    )
+    cumvol_today = None
+    if today_series and minute_idx < len(today_series.cumvol_1m):
+        cumvol_today = int(today_series.cumvol_1m[minute_idx])
+
+    baseline_val = None
+    history_days = baseline_curve.history_days_used if baseline_curve else 0
+    if baseline_curve and minute_idx < len(baseline_curve.baseline_cumvol):
+        baseline_val = float(baseline_curve.baseline_cumvol[minute_idx])
+
+    rvol_raw = None
+    rvol = None
+    cap_applied = False
+    if baseline_val and baseline_val > 0 and cumvol_today is not None:
+        rvol_raw = float(cumvol_today / baseline_val)
+        rvol = rvol_raw
+        if cap is not None and cap > 0 and rvol_raw > cap:
+            rvol = float(cap)
+            cap_applied = True
+
+    baseline_low = bool(baseline_val is not None and baseline_val <= float(min_baseline))
+    insufficient_history = history_days < max(1, min_history_days)
+
+    return RvolTimeOfDayResult(
+        symbol=symbol,
+        minute_index=minute_idx,
+        cumvol_today=cumvol_today,
+        baseline_cumvol=baseline_val,
+        rvol_raw=rvol_raw,
+        rvol=rvol,
+        history_days_used=history_days,
+        baseline_low=baseline_low,
+        insufficient_history=insufficient_history,
+        session_mismatch=False,
+        cap_applied=cap_applied,
+    )
+
+
+def _baseline_curve_stale(curve: BaselineCurve, now_ny: datetime) -> bool:
+    updated_ny = curve.updated_at.astimezone(NY)
+    return updated_ny.date() != now_ny.date()
+
+
+def load_baseline_curve(
+    conn,
+    *,
+    symbol: str,
+    session: str,
+    bar_size: str,
+    lookback_days: int,
+    method: str,
+    trim_pct: float,
+) -> Optional[BaselineCurve]:
+    from . import db
+
+    row = db.load_baseline_curve(
+        conn,
+        symbol=symbol,
+        session=session,
+        bar_size=bar_size,
+        lookback_days=lookback_days,
+        method=method,
+        trim_pct=trim_pct,
+    )
+    if not row:
+        return None
+    updated = datetime.fromisoformat(row["updated_utc"])
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=UTC)
+    return BaselineCurve(
+        symbol=row["symbol"],
+        session=row["session"],
+        bar_size=row["bar_size"],
+        lookback_days=row["lookback_days"],
+        method=row["method"],
+        trim_pct=row["trim_pct"],
+        updated_at=updated,
+        baseline_cumvol=row["baseline_cumvol"],
+        history_days_used=row["history_days_used"],
+        notes=row.get("notes"),
+    )
+
+
+def upsert_baseline_curve(conn, curve: BaselineCurve) -> None:
+    from . import db
+
+    db.upsert_baseline_curve(
+        conn,
+        symbol=curve.symbol,
+        session=curve.session,
+        bar_size=curve.bar_size,
+        lookback_days=curve.lookback_days,
+        method=curve.method,
+        trim_pct=curve.trim_pct,
+        updated_utc=curve.updated_at.astimezone(UTC).replace(microsecond=0).isoformat(),
+        history_days_used=curve.history_days_used,
+        baseline_cumvol=curve.baseline_cumvol,
+        notes=curve.notes,
+    )
+
+
+def get_or_build_baseline_curve(
+    conn,
+    *,
+    symbol: str,
+    bars_utc: Iterable[Tuple[datetime, int]],
+    now_ny: datetime,
+    session: str,
+    bar_size: str,
+    lookback_days: int,
+    method: str,
+    trim_pct: float,
+    min_history_days: int,
+    min_baseline: int,
+    calendar_name: str | None = None,
+) -> BaselineCurve:
+    cached = load_baseline_curve(
+        conn,
+        symbol=symbol,
+        session=session,
+        bar_size=bar_size,
+        lookback_days=lookback_days,
+        method=method,
+        trim_pct=trim_pct,
+    )
+    if cached and not _baseline_curve_stale(cached, now_ny):
+        return cached
+
+    curve = build_baseline_curve_from_bars(
+        symbol=symbol,
+        bars_utc=bars_utc,
+        now_ny=now_ny,
+        session=session,
+        bar_size=bar_size,
+        lookback_days=lookback_days,
+        method=method,
+        trim_pct=trim_pct,
+        min_history_days=min_history_days,
+        min_baseline=min_baseline,
+        calendar_name=calendar_name,
+    )
+    upsert_baseline_curve(conn, curve)
+    return curve
 
 
 def _cap_end_clock(now_ny: datetime, *, use_rth: bool) -> time:

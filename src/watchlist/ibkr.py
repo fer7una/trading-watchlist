@@ -8,6 +8,25 @@ from typing import List, Optional, Tuple
 
 from ib_insync import IB, Stock, ScannerSubscription
 
+SCAN_INSTRUMENT = "STK"
+SCAN_LOCATION_CODE = "STK.NASDAQ"
+SCAN_CODE = "TOP_PERC_GAIN"
+
+MARKET_DATA_TYPE_LABELS = {
+    1: "live",
+    2: "frozen",
+    3: "delayed",
+    4: "delayed-frozen",
+}
+
+
+def market_data_type_label(market_data_type: int) -> str:
+    return MARKET_DATA_TYPE_LABELS.get(int(market_data_type), "unknown")
+
+
+class IbkrConnectionError(RuntimeError):
+    pass
+
 
 @dataclass(frozen=True)
 class IbContractInfo:
@@ -30,7 +49,13 @@ def connect(host: str, port: int, client_id: int, timeout_s: float, market_data_
         # evita colisiones con scans “zombie”
         client_id = client_id + (os.getpid() % 1000)
         
-    ib.connect(host, port, clientId=client_id, readonly=True, timeout=timeout_s)
+    try:
+        ib.connect(host, port, clientId=client_id, readonly=True, timeout=timeout_s)
+    except (TimeoutError, OSError) as exc:
+        raise IbkrConnectionError(
+            f"IBKR connection failed (host={host} port={port}). "
+            "Verify TWS/Gateway is running and IB_HOST/IB_PORT are correct."
+        ) from exc
     # 1=live, 2=frozen, 3=delayed, 4=delayed-frozen
     ib.reqMarketDataType(int(market_data_type))
     return ib
@@ -45,9 +70,9 @@ def scan_top_perc_gainers(
     max_rows: int
 ) -> List[IbContractInfo]:
     sub = ScannerSubscription()
-    sub.instrument = "STK"
-    sub.locationCode = "STK.NASDAQ"   # o el que estés probando con fallback
-    sub.scanCode = "TOP_PERC_GAIN"
+    sub.instrument = SCAN_INSTRUMENT
+    sub.locationCode = SCAN_LOCATION_CODE   # o el que estés probando con fallback
+    sub.scanCode = SCAN_CODE
     sub.numberOfRows = max_rows
 
     rows = ib.reqScannerData(sub, [], [])
@@ -74,6 +99,9 @@ def scan_top_perc_gainers(
         symbol = getattr(c, "symbol", None)
         con_id = getattr(c, "conId", None)
         primary_exchange = getattr(c, "primaryExchange", None) or getattr(cd, "primaryExchange", None)
+        exchange = getattr(c, "exchange", None)
+        if not primary_exchange and exchange and str(exchange).upper() == "SMART":
+            primary_exchange = "SMART"
 
         if not symbol or not con_id:
             dropped += 1
@@ -155,11 +183,19 @@ def historical_bars_intraday(
     c = Stock(symbol, "SMART", "USD")
     ib.qualifyContracts(c)
 
+    def _normalize_bar_size(value: str) -> str:
+        v = (value or "").strip().lower()
+        if v.endswith("m") and v[:-1].isdigit():
+            return f"{int(v[:-1])} min"
+        if v.endswith("min") and v[:-3].isdigit():
+            return f"{int(v[:-3])} min"
+        return value
+
     return ib.reqHistoricalData(
         c,
         endDateTime="",
         durationStr=f"{duration_days} D",
-        barSizeSetting=bar_size,
+        barSizeSetting=_normalize_bar_size(bar_size),
         whatToShow="TRADES",
         useRTH=1 if use_rth else 0,
         formatDate=1,

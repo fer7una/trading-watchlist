@@ -47,10 +47,11 @@ class RuntimeSettings:
     rvol_bar_size: str
     rvol_throttle_s: float
     use_rth: bool
+    rvol_session: str
     rvol_method: str
     rvol_trim_pct: float
-    min_rvol_days_valid: int
-    rvol_baseline_floor_vol: int
+    rvol_min_history_days: int
+    rvol_min_baseline: int
     rvol_cap: float
 
     # News
@@ -63,6 +64,9 @@ class RuntimeSettings:
     sanity_prevclose_min: float
     sanity_change_pct_max: float
     min_vol_for_high_change: int
+
+    # Market calendar
+    market_calendar: str
 
     # Debug
     debug: bool
@@ -131,6 +135,14 @@ def load_settings(project_root: str | None = None) -> RuntimeSettings:
         rvol_anchor_ny = os.getenv("RVOL_ANCHOR_NY", "04:00")
         use_rth = os.getenv("USE_RTH", "0") == "1"
 
+    min_history_env = os.getenv("RVOL_MIN_HISTORY_DAYS", "") or os.getenv("MIN_RVOL_DAYS_VALID", "")
+    min_history_days = int(min_history_env or "10")
+    min_baseline_env = os.getenv("RVOL_MIN_BASELINE", "") or os.getenv("RVOL_BASELINE_FLOOR_VOL", "")
+    min_baseline = int(min_baseline_env or "1000")
+    rvol_method_env = os.getenv("RVOL_BASELINE_METHOD", "") or os.getenv("RVOL_METHOD", "")
+    rvol_method = (rvol_method_env or "trimmed_mean").strip().lower()
+    rvol_session = os.getenv("RVOL_SESSION", "RTH").strip().upper()
+
     return RuntimeSettings(
         db_path=os.getenv("WATCHLIST_DB", "./data/watchlist.db"),
         out_dir=os.getenv("OUT_DIR", "./out"),
@@ -143,14 +155,15 @@ def load_settings(project_root: str | None = None) -> RuntimeSettings:
         float_allow_stale_days=int(os.getenv("FLOAT_ALLOW_STALE_DAYS", "14")),
         profile_used="OPEN" if open_profile else "PRE",
         rvol_anchor_ny=rvol_anchor_ny,
-        rvol_lookback_days=int(os.getenv("RVOL_LOOKBACK_DAYS", "7")),
-        rvol_bar_size=os.getenv("RVOL_BAR_SIZE", "5 mins"),
+        rvol_lookback_days=int(os.getenv("RVOL_LOOKBACK_DAYS", "30")),
+        rvol_bar_size=os.getenv("RVOL_BAR_SIZE", "1m"),
         rvol_throttle_s=float(os.getenv("RVOL_THROTTLE_S", "0.25")),
         use_rth=use_rth,
-        rvol_method=os.getenv("RVOL_METHOD", "median").strip().lower(),
-        rvol_trim_pct=float(os.getenv("RVOL_TRIM_PCT", "0.15")),
-        min_rvol_days_valid=int(os.getenv("MIN_RVOL_DAYS_VALID", "5")),
-        rvol_baseline_floor_vol=int(os.getenv("RVOL_BASELINE_FLOOR_VOL", "50000")),
+        rvol_session=rvol_session,
+        rvol_method=rvol_method,
+        rvol_trim_pct=float(os.getenv("RVOL_TRIM_PCT", "0.10")),
+        rvol_min_history_days=min_history_days,
+        rvol_min_baseline=min_baseline,
         rvol_cap=float(os.getenv("RVOL_CAP", "200.0")),
         news_provider=os.getenv("NEWS_PROVIDER", "fmp").strip().lower(),
         news_lookback_hours=int(os.getenv("NEWS_LOOKBACK_HOURS", "24")),
@@ -159,6 +172,7 @@ def load_settings(project_root: str | None = None) -> RuntimeSettings:
         sanity_prevclose_min=float(os.getenv("SANITY_PREVCLOSE_MIN", "1.0")),
         sanity_change_pct_max=float(os.getenv("SANITY_CHANGE_PCT_MAX", "150.0")),
         min_vol_for_high_change=int(os.getenv("MIN_VOL_FOR_HIGH_CHANGE", "50000")),
+        market_calendar=os.getenv("MARKET_CALENDAR", "NYSE"),
         debug=debug_enabled,
         filters=filters,
     )

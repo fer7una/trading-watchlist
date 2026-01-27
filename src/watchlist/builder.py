@@ -29,6 +29,21 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
     db.init_schema(conn, schema_file=os.path.join("config", "schema.sql"))
 
     ib = ibkr.connect(settings.ib_host, settings.ib_port, settings.ib_client_id, settings.ib_timeout_s, settings.ib_market_data_type)
+    if settings.debug:
+        print(
+            "IBKR market_data_type={code} ({label})".format(
+                code=settings.ib_market_data_type,
+                label=ibkr.market_data_type_label(settings.ib_market_data_type),
+            )
+        )
+        print(
+            "Scanner config instrument={inst} location={loc} scanCode={code} rows={rows}".format(
+                inst=ibkr.SCAN_INSTRUMENT,
+                loc=ibkr.SCAN_LOCATION_CODE,
+                code=ibkr.SCAN_CODE,
+                rows=settings.filters.max_candidates,
+            )
+        )
 
     scan = ibkr.scan_top_perc_gainers(
         ib,
@@ -111,7 +126,7 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
     filtered.sort(key=lambda t: (t[1].change_pct or 0.0), reverse=True)
     top_for_rvol = filtered[: settings.filters.max_rvol_symbols]
 
-    duration_days = settings.rvol_lookback_days + 3
+    duration_days = settings.rvol_lookback_days + 7
     since_utc = (now_ny - timedelta(days=duration_days)).astimezone(UTC)
     since_iso = _iso(since_utc)
 
@@ -128,14 +143,19 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
                     dt = dt.replace(tzinfo=UTC)
                 bars.append((dt, int(vol)))
 
+        expected_bars_per_day = rvol.session_bar_count(settings.rvol_session, settings.rvol_bar_size)
+        min_required_bars = expected_bars_per_day * max(1, settings.rvol_min_history_days)
+        use_rth_for_hist = settings.use_rth
+        if settings.rvol_session.strip().upper() == "RTH+PRE":
+            use_rth_for_hist = False
         # if not enough cache, fetch from IBKR
-        if len(bars) < 500:
+        if len(bars) < min_required_bars:
             try:
                 hist = ibkr.historical_bars_intraday(
                     ib,
                     m.symbol,
                     duration_days=duration_days,
-                    use_rth=settings.use_rth,
+                    use_rth=use_rth_for_hist,
                     bar_size=settings.rvol_bar_size,
                 )
             except TimeoutError:
@@ -160,50 +180,76 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
                         dt = dt.replace(tzinfo=UTC)
                     bars.append((dt, int(v)))
 
-        rvol_result = rvol.compute_rvol_from_bars_details(
-            bars,
-            anchor_time_ny=settings.rvol_anchor_ny,
-            lookback_days=settings.rvol_lookback_days,
-            use_rth=settings.use_rth,
+        baseline_curve = rvol.get_or_build_baseline_curve(
+            conn,
+            symbol=m.symbol,
+            bars_utc=bars,
             now_ny=now_ny,
+            session=settings.rvol_session,
             bar_size=settings.rvol_bar_size,
+            lookback_days=settings.rvol_lookback_days,
             method=settings.rvol_method,
             trim_pct=settings.rvol_trim_pct,
-            min_days_valid=settings.min_rvol_days_valid,
-            baseline_floor_vol=settings.rvol_baseline_floor_vol,
+            min_history_days=settings.rvol_min_history_days,
+            min_baseline=settings.rvol_min_baseline,
+            calendar_name=settings.market_calendar,
+        )
+        rvol_result = rvol.compute_rvol_time_of_day(
+            symbol=m.symbol,
+            bars_utc=bars,
+            baseline_curve=baseline_curve,
+            now_ny=now_ny,
+            session=settings.rvol_session,
+            bar_size=settings.rvol_bar_size,
+            min_history_days=settings.rvol_min_history_days,
+            min_baseline=settings.rvol_min_baseline,
             cap=settings.rvol_cap,
         )
         if rvol_result:
             m.rvol = rvol_result.rvol
             m.rvol_raw = rvol_result.rvol_raw
-            m.rvol_days_valid = rvol_result.days_valid
+            m.rvol_days_valid = rvol_result.history_days_used
             m.rvol_cap_applied = rvol_result.cap_applied
+            m.rvol_cumvol_today = rvol_result.cumvol_today
+            m.rvol_baseline = rvol_result.baseline_cumvol
+            m.rvol_minute_index = rvol_result.minute_index
+            m.rvol_baseline_low = rvol_result.baseline_low
+            m.rvol_insufficient_history = rvol_result.insufficient_history
+            m.rvol_session_mismatch = rvol_result.session_mismatch
             cap_for_score = settings.rvol_cap if settings.rvol_cap and settings.rvol_cap > 1 else 200.0
-            m.rvol_score = min(1.0, math.log10(max(m.rvol_raw, 1.0)) / math.log10(cap_for_score))
+            if m.rvol_raw is not None:
+                m.rvol_score = min(1.0, math.log10(max(m.rvol_raw, 1.0)) / math.log10(cap_for_score))
+            else:
+                m.rvol_score = None
         else:
             m.rvol = None
             m.rvol_raw = None
             m.rvol_days_valid = None
             m.rvol_cap_applied = None
+            m.rvol_cumvol_today = None
+            m.rvol_baseline = None
+            m.rvol_minute_index = None
+            m.rvol_baseline_low = None
+            m.rvol_insufficient_history = None
+            m.rvol_session_mismatch = None
             m.rvol_score = None
 
         if settings.debug:
             if rvol_result:
                 print(
-                    "RVOL detail {sym}: todayVol={today} baseline(min/med/max)={minv}/{medv}/{maxv} "
-                    "baseline={base:.0f} days={days} method={method} raw={raw:.2f} rvol={rvol:.2f} cap={cap}"
+                    "RVOL detail {sym}: t={idx} cumvol={cum} baseline={base} days={days} "
+                    "raw={raw} cap={cap} flags=baseline_low:{low} insufficient_history:{ih} session_mismatch:{sm}"
                     .format(
                         sym=m.symbol,
-                        today=rvol_result.today_volume,
-                        minv=int(rvol_result.baseline_min),
-                        medv=int(rvol_result.baseline_median),
-                        maxv=int(rvol_result.baseline_max),
-                        base=rvol_result.baseline,
-                        days=rvol_result.days_valid,
-                        method=rvol_result.method,
+                        idx=rvol_result.minute_index,
+                        cum=rvol_result.cumvol_today,
+                        base=rvol_result.baseline_cumvol,
+                        days=rvol_result.history_days_used,
                         raw=rvol_result.rvol_raw,
-                        rvol=rvol_result.rvol,
                         cap="yes" if rvol_result.cap_applied else "no",
+                        low=rvol_result.baseline_low,
+                        ih=rvol_result.insufficient_history,
+                        sm=rvol_result.session_mismatch,
                     )
                 )
             else:
@@ -212,7 +258,8 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
     # final filters + grading
     candidates: List[Tuple[ibkr.IbContractInfo, Metrics]] = []
     for c, m in filtered:
-        if m.rvol is None or m.rvol < settings.filters.rvol_min:
+        rvol_for_filter = m.rvol_raw if m.rvol_raw is not None else m.rvol
+        if rvol_for_filter is None or rvol_for_filter < settings.filters.rvol_min:
             continue
         if settings.filters.spread_abs_max > 0:
             if m.spread is None or m.spread > settings.filters.spread_abs_max:
@@ -323,9 +370,17 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
             "floatShares": m.float_shares,
             "rvol": m.rvol,
             "rvolRaw": m.rvol_raw,
+            "rvolCumVol": m.rvol_cumvol_today,
+            "rvolBaseline": m.rvol_baseline,
+            "rvolMinuteIndex": m.rvol_minute_index,
             "rvolScore": m.rvol_score,
             "rvolDaysValid": m.rvol_days_valid,
             "capApplied": m.rvol_cap_applied,
+            "rvolFlags": {
+                "baselineLow": m.rvol_baseline_low,
+                "insufficientHistory": m.rvol_insufficient_history,
+                "sessionMismatch": m.rvol_session_mismatch,
+            },
             "hasCatalyst": has_catalyst_val,
             "catalyst": catalyst_text,
             "catalystProvider": news_info.get("provider"),
@@ -356,6 +411,24 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         "run_id": str(uuid.uuid4()),
         "generated_utc": _iso(now_utc),
         "generated_ny": _iso(now_ny),
+        "config": {
+            "profile": settings.profile_used,
+            "debug": settings.debug,
+            "ibkr": {
+                "host": settings.ib_host,
+                "port": settings.ib_port,
+                "client_id": settings.ib_client_id,
+                "timeout_s": settings.ib_timeout_s,
+                "market_data_type": settings.ib_market_data_type,
+                "market_data_type_label": ibkr.market_data_type_label(settings.ib_market_data_type),
+            },
+            "scanner": {
+                "instrument": ibkr.SCAN_INSTRUMENT,
+                "location_code": ibkr.SCAN_LOCATION_CODE,
+                "scan_code": ibkr.SCAN_CODE,
+                "max_rows": settings.filters.max_candidates,
+            },
+        },
         "scan": {
             "candidates": scan_candidates_count,
             "prelim": len(prelim),
@@ -369,10 +442,11 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
             "lookback_days": settings.rvol_lookback_days,
             "use_rth": settings.use_rth,
             "bar_size": settings.rvol_bar_size,
+            "session": settings.rvol_session,
             "method": settings.rvol_method,
             "trim_pct": settings.rvol_trim_pct,
-            "min_days_valid": settings.min_rvol_days_valid,
-            "baseline_floor_vol": settings.rvol_baseline_floor_vol,
+            "min_days_valid": settings.rvol_min_history_days,
+            "baseline_floor_vol": settings.rvol_min_baseline,
             "cap": settings.rvol_cap,
         },
         "news": {

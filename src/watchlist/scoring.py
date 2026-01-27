@@ -21,6 +21,12 @@ class Metrics:
     rvol_score: Optional[float] = None
     rvol_days_valid: Optional[int] = None
     rvol_cap_applied: Optional[bool] = None
+    rvol_cumvol_today: Optional[int] = None
+    rvol_baseline: Optional[float] = None
+    rvol_minute_index: Optional[int] = None
+    rvol_baseline_low: Optional[bool] = None
+    rvol_insufficient_history: Optional[bool] = None
+    rvol_session_mismatch: Optional[bool] = None
     has_catalyst: bool = False
     suspect_corporate_action: bool = False
     suspect_data: bool = False

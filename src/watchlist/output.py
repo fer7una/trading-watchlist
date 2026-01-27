@@ -16,6 +16,8 @@ def tv_symbol(symbol: str, primary_exchange: Optional[str]) -> str:
     if not primary_exchange:
         return f"NYSE:{symbol}"
     pe = primary_exchange.upper()
+    if pe == "SMART":
+        return symbol
     if "NASDAQ" in pe:
         return f"NASDAQ:{symbol}"
     if "NYSE" in pe:

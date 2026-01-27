@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -80,3 +81,83 @@ def load_minute_volumes_since(conn: sqlite3.Connection, symbol: str, since_utc_i
         (symbol, since_utc_iso),
     )
     return [(row[0], int(row[1] or 0)) for row in cur.fetchall()]
+
+
+def load_baseline_curve(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    session: str,
+    bar_size: str,
+    lookback_days: int,
+    method: str,
+    trim_pct: float,
+) -> Optional[Dict]:
+    cur = conn.execute(
+        """
+        SELECT symbol, session, bar_size, lookback_days, method, trim_pct, updated_utc, history_days_used, baseline_json, notes
+        FROM baseline_curves
+        WHERE symbol = ?
+          AND session = ?
+          AND bar_size = ?
+          AND lookback_days = ?
+          AND method = ?
+          AND trim_pct = ?
+        """,
+        (symbol, session, bar_size, int(lookback_days), method, float(trim_pct)),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    baseline_json = row[8]
+    baseline = json.loads(baseline_json) if baseline_json else []
+    return {
+        "symbol": row[0],
+        "session": row[1],
+        "bar_size": row[2],
+        "lookback_days": int(row[3]),
+        "method": row[4],
+        "trim_pct": float(row[5]),
+        "updated_utc": row[6],
+        "history_days_used": int(row[7] or 0),
+        "baseline_cumvol": baseline,
+        "notes": row[9],
+    }
+
+
+def upsert_baseline_curve(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    session: str,
+    bar_size: str,
+    lookback_days: int,
+    method: str,
+    trim_pct: float,
+    updated_utc: str,
+    history_days_used: int,
+    baseline_cumvol: List[float],
+    notes: Optional[str],
+) -> None:
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO baseline_curves(
+          symbol, session, bar_size, lookback_days, method, trim_pct,
+          updated_utc, history_days_used, baseline_json, notes
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            symbol,
+            session,
+            bar_size,
+            int(lookback_days),
+            method,
+            float(trim_pct),
+            updated_utc,
+            int(history_days_used),
+            json.dumps(baseline_cumvol),
+            notes,
+        ),
+    )
+    conn.commit()

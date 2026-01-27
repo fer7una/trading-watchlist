@@ -47,6 +47,7 @@ Schema reference for `out/watchlist.json`. Fields are optional unless noted.
 - `lookback_days` (int)
 - `use_rth` (bool)
 - `bar_size` (string, IBKR bar size, e.g. `5 mins`)
+- `session` (string, `RTH` | `RTH+PRE`)
 - `method` (string, `median` | `trimmed_mean` | `mean`)
 - `trim_pct` (float, only used for `trimmed_mean`)
 - `min_days_valid` (int, minimum valid days in baseline)
@@ -54,10 +55,11 @@ Schema reference for `out/watchlist.json`. Fields are optional unless noted.
 - `cap` (float, max RVOL if > 0; 0 disables cap)
 
 RVOL calculation:
-- Window = sum(volume) from `anchor_time_ny` to `now` (cap at 16:00 NY).
-- For past days, use the same clock window as today.
-- Baseline = median / trimmed mean / mean of valid past windows.
-- If `min_days_valid` not met or baseline < `baseline_floor_vol`, RVOL is null.
+- Time-of-day adjusted: baseline is cumulative volume per minute index in session.
+- `rvolRaw = cumvol_today[t] / baseline_cumvol[t]` where `t` is minute index from session start.
+- Baseline samples use the configured method (`median`/`trimmed_mean`/`mean`) per minute.
+- `baseline_floor_vol` clamps low baselines to avoid near-zero divisions.
+- `min_days_valid` < required days sets insufficient-history flags (but still returns a curve).
 
 ## news
 - `lookback_hours` (int)
@@ -80,9 +82,16 @@ Each row is a dict with:
 - `floatShares` (int, shares)
 - `rvol` (float, RVOL capped if `cap` > 0)
 - `rvolRaw` (float, uncapped RVOL)
+- `rvolCumVol` (int, cumulative volume today at minute `t`)
+- `rvolBaseline` (float, baseline cumulative volume at minute `t`)
+- `rvolMinuteIndex` (int, minutes since session start)
 - `rvolScore` (float, 0..1, log-scaled score from `rvolRaw`)
 - `rvolDaysValid` (int, number of valid baseline days)
 - `capApplied` (bool, `true` if RVOL cap was applied)
+- `rvolFlags` (object)
+  - `baselineLow` (bool)
+  - `insufficientHistory` (bool)
+  - `sessionMismatch` (bool)
 - `hasCatalyst` (bool or null)
   - `true`: recent news found within lookback
   - `false`: API ok, no recent news

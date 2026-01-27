@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .builder import build_watchlist
+from .ibkr import IbkrConnectionError
 from .market_phase import MarketPhase, get_market_phase, get_schedule_for_date
 from .output import tv_symbol, write_json, write_tradingview_txt
 from .profiles import resolve_effective_profile
@@ -320,7 +321,13 @@ def main() -> int:
     schedule_times = get_schedule_for_date(now_ny.date())
     schedule_times_ny = _serialize_schedule_times(schedule_times)
 
-    payload = build_watchlist(settings)
+    try:
+        payload = build_watchlist(settings)
+    except IbkrConnectionError as exc:
+        print(f"ERROR: {exc}")
+        if settings.debug and exc.__cause__ is not None:
+            print(f"DEBUG: root_cause={exc.__cause__!r}")
+        return 2
     payload["profile_used"] = profile_used
     payload["phase"] = profile_used
     payload["market_phase"] = phase.value

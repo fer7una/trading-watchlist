@@ -33,6 +33,22 @@ CREATE TABLE IF NOT EXISTS minute_bars (
   FOREIGN KEY(symbol) REFERENCES symbols(symbol)
 );
 
+-- Curvas baseline RVOL (time-of-day)
+CREATE TABLE IF NOT EXISTS baseline_curves (
+  symbol TEXT NOT NULL,
+  session TEXT NOT NULL,
+  bar_size TEXT NOT NULL,
+  lookback_days INTEGER NOT NULL,
+  method TEXT NOT NULL,
+  trim_pct REAL NOT NULL,
+  updated_utc TEXT NOT NULL,
+  history_days_used INTEGER NOT NULL,
+  baseline_json TEXT NOT NULL,
+  notes TEXT,
+  PRIMARY KEY(symbol, session, bar_size, lookback_days, method, trim_pct),
+  FOREIGN KEY(symbol) REFERENCES symbols(symbol)
+);
+
 -- Ejecuciones diarias del generador
 CREATE TABLE IF NOT EXISTS watchlist_runs (
   run_id TEXT PRIMARY KEY,
@@ -62,3 +78,4 @@ CREATE TABLE IF NOT EXISTS watchlist_items (
 
 CREATE INDEX IF NOT EXISTS idx_minute_bars_symbol_ts ON minute_bars(symbol, ts_utc);
 CREATE INDEX IF NOT EXISTS idx_float_symbol_date ON float_snapshots(symbol, asof_date);
+CREATE INDEX IF NOT EXISTS idx_baseline_curves_symbol ON baseline_curves(symbol);

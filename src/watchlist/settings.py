@@ -53,6 +53,7 @@ class RuntimeSettings:
     rvol_min_history_days: int
     rvol_min_baseline: int
     rvol_cap: float
+    rvol_permissive_if_not_live: bool
 
     # News
     news_provider: str
@@ -70,6 +71,13 @@ class RuntimeSettings:
 
     # Debug
     debug: bool
+    # Intraday filters
+    time_filters_enabled: bool
+    time_bucket_label: str | None
+    time_bucket_window: str | None
+    time_bucket_tz: str | None
+    # Scanner universe
+    exclude_otc_pink: bool
 
     filters: Filters
 
@@ -165,6 +173,7 @@ def load_settings(project_root: str | None = None) -> RuntimeSettings:
         rvol_min_history_days=min_history_days,
         rvol_min_baseline=min_baseline,
         rvol_cap=float(os.getenv("RVOL_CAP", "200.0")),
+        rvol_permissive_if_not_live=os.getenv("RVOL_PERMISSIVE_IF_NOT_LIVE", "1") in ("1", "true", "True"),
         news_provider=os.getenv("NEWS_PROVIDER", "fmp").strip().lower(),
         news_lookback_hours=int(os.getenv("NEWS_LOOKBACK_HOURS", "24")),
         news_debug_top_n=int(os.getenv("NEWS_DEBUG_TOP_N", "10")),
@@ -174,5 +183,10 @@ def load_settings(project_root: str | None = None) -> RuntimeSettings:
         min_vol_for_high_change=int(os.getenv("MIN_VOL_FOR_HIGH_CHANGE", "50000")),
         market_calendar=os.getenv("MARKET_CALENDAR", "NYSE"),
         debug=debug_enabled,
+        time_filters_enabled=False,
+        time_bucket_label=None,
+        time_bucket_window=None,
+        time_bucket_tz=None,
+        exclude_otc_pink=os.getenv("EXCLUDE_OTC_PINK", "1") in ("1", "true", "True"),
         filters=filters,
     )

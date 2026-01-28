@@ -75,6 +75,39 @@ Variables por perfil (todas opcionales, con fallback a las actuales):
 
 Ejemplo: `PRE_PRICE_MIN=2` o `OPEN_USE_RTH=1`.
 
+## Filtros intradía (por hora)
+
+Si quieres que los umbrales cambien **durante la sesión**, puedes definir ventanas horarias
+basadas en la **hora del mercado** (por defecto `America/New_York`), independientemente de
+dónde se ejecute el script.
+
+Variables:
+
+- `INTRADAY_FILTERS=1` activa el modo.
+- `INTRADAY_TZ=America/New_York` (opcional) zona horaria de referencia.
+- `INTRADAY_WINDOWS` define las ventanas y su *prefijo* de variables, por ejemplo:
+
+```
+INTRADAY_WINDOWS=09:30-10:00=OPEN1,10:00-11:30=OPEN2,11:30-14:30=MID,14:30-16:00=LATE
+```
+
+Luego defines los overrides por prefijo, igual que en perfiles:
+
+```
+OPEN1_CHANGE_MIN_PCT=5
+OPEN1_VOLUME_MIN=200000
+OPEN1_RVOL_MIN=2
+OPEN1_SPREAD_PCT_MAX=0.03
+
+LATE_CHANGE_MIN_PCT=10
+LATE_VOLUME_MIN=800000
+LATE_RVOL_MIN=4
+LATE_SPREAD_PCT_MAX=0.015
+```
+
+Si no hay una ventana que encaje con la hora actual, se mantienen los filtros base del perfil.
+En el output verás `config.time_filters` con la ventana aplicada (si la hay).
+
 ## Fallback en mercado cerrado
 
 Si la fase es **CLOSED** y el scanner devuelve 0 candidatos o la lista final queda vacía:
@@ -106,6 +139,9 @@ wsl -d Ubuntu -- bash -lc "cd /ruta/al/repo && source .venv/bin/activate && make
 ## Notas importantes
 
 - **IBKR Scanner** no filtra por float. Por eso el float lo metemos por FMP.
+- `EXCLUDE_OTC_PINK=1` (default) filtra OTC/Pink por `primaryExchange`. Pon `0` para incluirlos.
+- `SCAN_LOCATION_CODE=STK.US.MAJOR` (default) limita el universo a US major (NYSE/NASDAQ/AMEX) para evitar OTC/Pink.
+- `RVOL_PERMISSIVE_IF_NOT_LIVE=1` permite pasar símbolos sin RVOL cuando no hay data en tiempo real.
 - Para RVOL serio usamos enfoque **time-of-day** (vol acumulado hasta el minuto actual / media histórica a esa misma hora).
 - Si tu IBKR no devuelve algunas métricas (por ejemplo `volume` en snapshot), baja a barras 1m para derivarlas.
 - `MAX_CANDIDATES` por defecto es **50** (límite típico por scan code). Ajusta si tu cuenta devuelve más.

@@ -52,12 +52,28 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         volume_min=settings.filters.volume_min,
         max_rows=settings.filters.max_candidates,
     )
+    scan_raw_count = len(scan)
+    excluded_otc_pink = 0
+    if settings.exclude_otc_pink:
+        before = len(scan)
+        scan = [c for c in scan if not ibkr.is_otc_pink(c.primary_exchange)]
+        excluded_otc_pink = before - len(scan)
+        if settings.debug and excluded_otc_pink:
+            print(f"Scanner excluded OTC/Pink: {excluded_otc_pink}")
     scan_candidates_count = len(scan)
     if settings.debug:
         print(f"scan candidates: {scan_candidates_count}")
         if scan_candidates_count == 0:
             print("scan candidates is 0; scanner tried fallback codes, check IBKR errors/entitlements")
     invalid_last_count = 0
+    drop_reasons = {
+        "invalid_last": 0,
+        "price_out_of_range": 0,
+        "missing_prev_close": 0,
+        "change_below_min": 0,
+        "missing_volume": 0,
+        "volume_below_min": 0,
+    }
 
     # cache symbols metadata
     for c in scan:
@@ -69,16 +85,24 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         last, prev_close, vol_today, bid, ask = ibkr.snapshot_metrics(ib, c.symbol)
         if last is None or last <= 0:
             invalid_last_count += 1
+            drop_reasons["invalid_last"] += 1
             continue
         if not (settings.filters.price_min <= last <= settings.filters.price_max):
+            drop_reasons["price_out_of_range"] += 1
             continue
 
-        change_pct = None
-        if prev_close not in (None, 0) and last is not None:
-            change_pct = ((last - prev_close) / prev_close) * 100.0
-        if change_pct is None or change_pct < settings.filters.change_min_pct:
+        if prev_close is None or prev_close <= 0:
+            drop_reasons["missing_prev_close"] += 1
             continue
-        if vol_today is None or vol_today < settings.filters.volume_min:
+        change_pct = ((last - prev_close) / prev_close) * 100.0
+        if change_pct < settings.filters.change_min_pct:
+            drop_reasons["change_below_min"] += 1
+            continue
+        if vol_today is None:
+            drop_reasons["missing_volume"] += 1
+            continue
+        if vol_today < settings.filters.volume_min:
+            drop_reasons["volume_below_min"] += 1
             continue
 
         spread = None
@@ -102,6 +126,7 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         prelim.append((c, m))
     if settings.debug:
         print(f"prelim after snapshot+basic filters: {len(prelim)}")
+        print(f"prelim drop reasons: {drop_reasons}")
 
     # float (DB cache + FMP for missing)
     float_map = db.load_float_snapshots(conn, asof_date_ny)
@@ -259,7 +284,13 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
     candidates: List[Tuple[ibkr.IbContractInfo, Metrics]] = []
     for c, m in filtered:
         rvol_for_filter = m.rvol_raw if m.rvol_raw is not None else m.rvol
-        if rvol_for_filter is None or rvol_for_filter < settings.filters.rvol_min:
+        rvol_required = True
+        if settings.rvol_permissive_if_not_live and int(settings.ib_market_data_type) != 1:
+            rvol_required = False
+        if rvol_for_filter is None:
+            if rvol_required:
+                continue
+        elif rvol_for_filter < settings.filters.rvol_min:
             continue
         if settings.filters.spread_abs_max > 0:
             if m.spread is None or m.spread > settings.filters.spread_abs_max:
@@ -414,6 +445,12 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
         "config": {
             "profile": settings.profile_used,
             "debug": settings.debug,
+            "time_filters": {
+                "enabled": settings.time_filters_enabled,
+                "label": settings.time_bucket_label,
+                "window": settings.time_bucket_window,
+                "tz": settings.time_bucket_tz,
+            },
             "ibkr": {
                 "host": settings.ib_host,
                 "port": settings.ib_port,
@@ -430,11 +467,14 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
             },
         },
         "scan": {
+            "raw_candidates": scan_raw_count,
             "candidates": scan_candidates_count,
             "prelim": len(prelim),
             "filtered": len(filtered),
             "final": len(final),
             "invalid_last": invalid_last_count,
+            "excluded_otc_pink": excluded_otc_pink,
+            "prelim_drop_reasons": drop_reasons,
         },
         "filters": filters_payload,
         "rvol": {
@@ -448,6 +488,8 @@ def build_watchlist(settings: RuntimeSettings) -> dict:
             "min_days_valid": settings.rvol_min_history_days,
             "baseline_floor_vol": settings.rvol_min_baseline,
             "cap": settings.rvol_cap,
+            "permissive_if_not_live": settings.rvol_permissive_if_not_live,
+            "market_data_type": settings.ib_market_data_type,
         },
         "news": {
             "lookback_hours": settings.news_lookback_hours,

@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple
 from ib_insync import IB, Stock, ScannerSubscription
 
 SCAN_INSTRUMENT = "STK"
-SCAN_LOCATION_CODE = "STK.NASDAQ"
+SCAN_LOCATION_CODE = os.getenv("SCAN_LOCATION_CODE", "STK.US.MAJOR")
 SCAN_CODE = "TOP_PERC_GAIN"
 
 MARKET_DATA_TYPE_LABELS = {
@@ -39,9 +39,16 @@ def connect(host: str, port: int, client_id: int, timeout_s: float, market_data_
     ib = IB()
 
     def on_error(reqId: int, errorCode: int, errorString: str, contract) -> None:
-        if errorCode in (2104, 2106, 2158, 162, 10167):
-            return
-        print(f"IB ERROR reqId={reqId} code={errorCode} msg={errorString}")
+        contract_summary = None
+        if contract is not None:
+            symbol = getattr(contract, "symbol", None)
+            con_id = getattr(contract, "conId", None)
+            if symbol or con_id:
+                contract_summary = f"{symbol or '?'}({con_id or '?'})"
+        if contract_summary:
+            print(f"IBKR_ERROR code={errorCode} reason={errorString} reqId={reqId} contract={contract_summary}")
+        else:
+            print(f"IBKR_ERROR code={errorCode} reason={errorString} reqId={reqId}")
 
     ib.errorEvent += on_error
 
@@ -128,6 +135,13 @@ def scan_top_perc_gainers(
         print("Scanner sample:", [(x.symbol, x.primary_exchange) for x in uniq[:5]])
 
     return uniq
+
+
+def is_otc_pink(primary_exchange: Optional[str]) -> bool:
+    if not primary_exchange:
+        return False
+    pe = primary_exchange.strip().upper()
+    return "OTC" in pe or "PINK" in pe or "OTCBB" in pe
 
 def _to_float(x):
     try:

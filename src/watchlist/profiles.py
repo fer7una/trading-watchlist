@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, time
 from typing import Mapping
 
 from .market_phase import MarketPhase, get_market_phase
 from .settings import Filters, RuntimeSettings, load_settings
 
+from zoneinfo import ZoneInfo
 
 _PROFILE_FIELDS = (
     "PRICE_MIN",
@@ -109,6 +110,7 @@ def resolve_effective_profile(profile_mode: str | None, now_utc: datetime) -> tu
     if open_raw in ("0", "1"):
         prefix = "OPEN" if open_raw == "1" else "PRE"
         settings = load_profile(prefix, env=env, base_settings=base_settings)
+        settings = apply_intraday_overrides(settings, now_utc, env=env)
         return prefix, settings
 
     mode = (profile_mode or env.get("PROFILE", "auto")).strip().lower()
@@ -145,4 +147,111 @@ def resolve_effective_profile(profile_mode: str | None, now_utc: datetime) -> tu
         prefix = _auto_prefix()
 
     settings = load_profile(prefix, env=env, base_settings=base_settings)
+    settings = apply_intraday_overrides(settings, now_utc, env=env)
     return prefix, settings
+
+
+def _parse_hhmm(value: str) -> time | None:
+    raw = value.strip()
+    if not raw:
+        return None
+    parts = raw.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return None
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return time(hour=hour, minute=minute)
+
+
+def _time_in_window(now_t: time, start: time, end: time) -> bool:
+    if start <= end:
+        return start <= now_t < end
+    return now_t >= start or now_t < end
+
+
+def _select_intraday_window(raw: str, now_t: time, debug: bool) -> tuple[str, str] | None:
+    for entry in raw.split(","):
+        chunk = entry.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            if debug:
+                print(f"WARN: INTRADAY_WINDOWS entry missing '=': {chunk!r}")
+            continue
+        time_part, label = chunk.split("=", 1)
+        label = label.strip()
+        if not label:
+            if debug:
+                print(f"WARN: INTRADAY_WINDOWS entry missing label: {chunk!r}")
+            continue
+        if "-" not in time_part:
+            if debug:
+                print(f"WARN: INTRADAY_WINDOWS entry missing '-': {chunk!r}")
+            continue
+        start_raw, end_raw = [s.strip() for s in time_part.split("-", 1)]
+        start = _parse_hhmm(start_raw)
+        end = _parse_hhmm(end_raw)
+        if start is None or end is None:
+            if debug:
+                print(f"WARN: INTRADAY_WINDOWS invalid time range: {chunk!r}")
+            continue
+        if _time_in_window(now_t, start, end):
+            return label, f"{start_raw}-{end_raw}"
+    return None
+
+
+def apply_intraday_overrides(
+    settings: RuntimeSettings,
+    now_utc: datetime,
+    env: Mapping[str, str] | None = None,
+) -> RuntimeSettings:
+    env = env or os.environ
+    enabled = env.get("INTRADAY_FILTERS", "0") in ("1", "true", "True")
+    if not enabled:
+        return settings
+
+    raw_windows = env.get("INTRADAY_WINDOWS", "").strip()
+    tz_name = env.get("INTRADAY_TZ", "America/New_York").strip() or "America/New_York"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        if settings.debug:
+            print(f"WARN: INTRADAY_TZ={tz_name!r} invalid; falling back to America/New_York.")
+        tz_name = "America/New_York"
+        tz = ZoneInfo(tz_name)
+
+    now_local = now_utc.astimezone(tz)
+    if not raw_windows:
+        return replace(
+            settings,
+            time_filters_enabled=True,
+            time_bucket_label=None,
+            time_bucket_window=None,
+            time_bucket_tz=tz_name,
+        )
+
+    match = _select_intraday_window(raw_windows, now_local.time(), settings.debug)
+    if not match:
+        return replace(
+            settings,
+            time_filters_enabled=True,
+            time_bucket_label=None,
+            time_bucket_window=None,
+            time_bucket_tz=tz_name,
+        )
+
+    label, window = match
+    updated = load_profile(label, env=env, base_settings=settings)
+    return replace(
+        updated,
+        profile_used=settings.profile_used,
+        time_filters_enabled=True,
+        time_bucket_label=label.upper(),
+        time_bucket_window=window,
+        time_bucket_tz=tz_name,
+    )
